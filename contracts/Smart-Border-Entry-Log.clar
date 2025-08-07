@@ -4,6 +4,10 @@
 (define-constant ERR_ENTRY_NOT_FOUND (err u404))
 (define-constant ERR_ALREADY_EXITED (err u405))
 
+(define-constant ERR_HEALTH_OFFICER_UNAUTHORIZED (err u406))
+(define-constant ERR_INVALID_HEALTH_STATUS (err u407))
+(define-constant ERR_HEALTH_DECLARATION_EXISTS (err u408))
+
 (define-data-var next-entry-id uint u1)
 
 (define-map authorized-agents principal bool)
@@ -175,3 +179,84 @@
 )
 
 (map-set authorized-agents CONTRACT_OWNER true)
+
+
+(define-map authorized-health-officers principal bool)
+(define-map health-declarations uint {
+    declaration-type: (string-ascii 20),
+    health-status: (string-ascii 15),
+    temperature: (optional uint),
+    symptoms: (string-ascii 100),
+    clearance-status: (string-ascii 10),
+    officer: principal,
+    declaration-timestamp: uint,
+    clearance-timestamp: (optional uint)
+})
+
+(define-map entry-health-mapping uint uint)
+
+(define-public (add-health-officer (officer principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (map-set authorized-health-officers officer true)
+        (ok true)
+    )
+)
+
+(define-public (record-health-declaration 
+    (entry-id uint) 
+    (declaration-type (string-ascii 20))
+    (health-status (string-ascii 15))
+    (temperature (optional uint))
+    (symptoms (string-ascii 100)))
+    (begin
+        (asserts! (default-to false (map-get? authorized-health-officers tx-sender)) ERR_HEALTH_OFFICER_UNAUTHORIZED)
+        (asserts! (is-some (map-get? border-entries entry-id)) ERR_ENTRY_NOT_FOUND)
+        (asserts! (is-none (map-get? entry-health-mapping entry-id)) ERR_HEALTH_DECLARATION_EXISTS)
+        (asserts! (or (is-eq health-status "healthy") (is-eq health-status "symptomatic") (is-eq health-status "fever")) ERR_INVALID_HEALTH_STATUS)
+        
+        (map-set health-declarations entry-id {
+            declaration-type: declaration-type,
+            health-status: health-status,
+            temperature: temperature,
+            symptoms: symptoms,
+            clearance-status: "pending",
+            officer: tx-sender,
+            declaration-timestamp: stacks-block-height,
+            clearance-timestamp: none
+        })
+        
+        (map-set entry-health-mapping entry-id entry-id)
+        (ok entry-id)
+    )
+)
+
+(define-public (update-health-clearance (entry-id uint) (clearance-status (string-ascii 10)))
+    (let (
+        (health-data (unwrap! (map-get? health-declarations entry-id) ERR_ENTRY_NOT_FOUND))
+    )
+        (asserts! (default-to false (map-get? authorized-health-officers tx-sender)) ERR_HEALTH_OFFICER_UNAUTHORIZED)
+        (asserts! (or (is-eq clearance-status "cleared") (is-eq clearance-status "rejected") (is-eq clearance-status "quarantine")) ERR_INVALID_HEALTH_STATUS)
+        
+        (map-set health-declarations entry-id (merge health-data {
+            clearance-status: clearance-status,
+            clearance-timestamp: (some stacks-block-height)
+        }))
+        (ok true)
+    )
+)
+
+(define-read-only (get-health-declaration (entry-id uint))
+    (map-get? health-declarations entry-id)
+)
+
+(define-read-only (is-health-officer (officer principal))
+    (default-to false (map-get? authorized-health-officers officer))
+)
+
+(define-read-only (get-entry-health-status (entry-id uint))
+    (match (map-get? health-declarations entry-id)
+        health-data (some (get clearance-status health-data))
+        none
+    )
+)
