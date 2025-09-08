@@ -8,6 +8,12 @@
 (define-constant ERR_INVALID_HEALTH_STATUS (err u407))
 (define-constant ERR_HEALTH_DECLARATION_EXISTS (err u408))
 
+(define-constant ERR_RISK_UNAUTHORIZED (err u409))
+(define-constant ERR_INVALID_RISK_SCORE (err u410))
+(define-constant ERR_RISK_ASSESSMENT_EXISTS (err u411))
+(define-constant HIGH_RISK_THRESHOLD u75)
+(define-constant MEDIUM_RISK_THRESHOLD u50)
+
 (define-data-var next-entry-id uint u1)
 
 (define-map authorized-agents principal bool)
@@ -260,3 +266,89 @@
         none
     )
 )
+
+
+(define-map authorized-risk-officers principal bool)
+(define-map traveler-risk-profiles principal {
+    current-risk-score: uint,
+    total-assessments: uint,
+    high-risk-incidents: uint,
+    last-assessment-timestamp: uint,
+    alert-status: (string-ascii 15)
+})
+(define-map risk-assessments uint {
+    traveler: principal,
+    entry-id: uint,
+    risk-score: uint,
+    risk-factors: (string-ascii 200),
+    assessed-by: principal,
+    assessment-timestamp: uint,
+    severity-level: (string-ascii 10)
+})
+(define-data-var next-risk-assessment-id uint u1)
+(define-map risk-statistics (string-ascii 20) uint)
+
+(define-public (authorize-risk-officer (officer principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (map-set authorized-risk-officers officer true)
+        (ok true)
+    )
+)
+
+(define-public (assess-traveler-risk (traveler principal) (entry-id uint) (risk-score uint) (risk-factors (string-ascii 200)))
+    (let (
+        (assessment-id (var-get next-risk-assessment-id))
+        (current-profile (default-to {current-risk-score: u0, total-assessments: u0, high-risk-incidents: u0, last-assessment-timestamp: u0, alert-status: "none"} (map-get? traveler-risk-profiles traveler)))
+        (severity (if (>= risk-score HIGH_RISK_THRESHOLD) "high" (if (>= risk-score MEDIUM_RISK_THRESHOLD) "medium" "low")))
+        (alert-status (if (>= risk-score HIGH_RISK_THRESHOLD) "high-risk" (if (>= risk-score MEDIUM_RISK_THRESHOLD) "watch-list" "cleared")))
+        (high-risk-count (if (>= risk-score HIGH_RISK_THRESHOLD) (+ (get high-risk-incidents current-profile) u1) (get high-risk-incidents current-profile)))
+    )
+        (asserts! (default-to false (map-get? authorized-risk-officers tx-sender)) ERR_RISK_UNAUTHORIZED)
+        (asserts! (<= risk-score u100) ERR_INVALID_RISK_SCORE)
+        (asserts! (is-some (map-get? border-entries entry-id)) ERR_ENTRY_NOT_FOUND)
+        
+        (map-set risk-assessments assessment-id {
+            traveler: traveler,
+            entry-id: entry-id,
+            risk-score: risk-score,
+            risk-factors: risk-factors,
+            assessed-by: tx-sender,
+            assessment-timestamp: stacks-block-height,
+            severity-level: severity
+        })
+        
+        (map-set traveler-risk-profiles traveler {
+            current-risk-score: risk-score,
+            total-assessments: (+ (get total-assessments current-profile) u1),
+            high-risk-incidents: high-risk-count,
+            last-assessment-timestamp: stacks-block-height,
+            alert-status: alert-status
+        })
+        
+        (map-set risk-statistics severity (+ (default-to u0 (map-get? risk-statistics severity)) u1))
+        (var-set next-risk-assessment-id (+ assessment-id u1))
+        (ok assessment-id)
+    )
+)
+
+(define-read-only (get-traveler-risk-profile (traveler principal))
+    (map-get? traveler-risk-profiles traveler)
+)
+
+(define-read-only (get-risk-assessment (assessment-id uint))
+    (map-get? risk-assessments assessment-id)
+)
+
+(define-read-only (is-high-risk-traveler (traveler principal))
+    (match (map-get? traveler-risk-profiles traveler)
+        profile (>= (get current-risk-score profile) HIGH_RISK_THRESHOLD)
+        false
+    )
+)
+
+(define-read-only (get-risk-statistics-by-severity (severity (string-ascii 10)))
+    (default-to u0 (map-get? risk-statistics severity))
+)
+
+(map-set authorized-risk-officers CONTRACT_OWNER true)
