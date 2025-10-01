@@ -351,4 +351,105 @@
     (default-to u0 (map-get? risk-statistics severity))
 )
 
-(map-set authorized-risk-officers CONTRACT_OWNER true)
+(define-constant ERR_COOLDOWN_VIOLATION (err u412))
+(define-constant ERR_INVALID_POLICY (err u413))
+
+(define-map entry-cooldown-policies (string-ascii 20) uint)
+(define-map traveler-frequency-stats principal {
+    total-crossings: uint,
+    average-interval: uint,
+    shortest-interval: uint,
+    longest-interval: uint,
+    last-entry-block: uint
+})
+
+(define-public (set-entry-cooldown-policy (policy-name (string-ascii 20)) (min-blocks uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (asserts! (> min-blocks u0) ERR_INVALID_POLICY)
+        (map-set entry-cooldown-policies policy-name min-blocks)
+        (ok true)
+    )
+)
+
+(define-public (validate-entry-timing (traveler principal) (policy-name (string-ascii 20)))
+    (let (
+        (cooldown-blocks (unwrap! (map-get? entry-cooldown-policies policy-name) ERR_INVALID_POLICY))
+        (stats (map-get? traveler-frequency-stats traveler))
+        (current-block stacks-block-height)
+    )
+        (match stats
+            traveler-stats
+                (let (
+                    (blocks-since-last (- current-block (get last-entry-block traveler-stats)))
+                )
+                    (asserts! (>= blocks-since-last cooldown-blocks) ERR_COOLDOWN_VIOLATION)
+                    (ok {allowed: true, blocks-since-last: blocks-since-last, required-cooldown: cooldown-blocks})
+                )
+            (ok {allowed: true, blocks-since-last: u0, required-cooldown: cooldown-blocks})
+        )
+    )
+)
+
+(define-public (update-frequency-stats (traveler principal))
+    (let (
+        (current-block stacks-block-height)
+        (existing-stats (map-get? traveler-frequency-stats traveler))
+    )
+        (asserts! (default-to false (map-get? authorized-agents tx-sender)) ERR_UNAUTHORIZED)
+        (match existing-stats
+            stats
+                (let (
+                    (interval (- current-block (get last-entry-block stats)))
+                    (new-total (+ (get total-crossings stats) u1))
+                    (new-avg (/ (+ (* (get average-interval stats) (get total-crossings stats)) interval) new-total))
+                    (new-shortest (if (< interval (get shortest-interval stats)) interval (get shortest-interval stats)))
+                    (new-longest (if (> interval (get longest-interval stats)) interval (get longest-interval stats)))
+                )
+                    (map-set traveler-frequency-stats traveler {
+                        total-crossings: new-total,
+                        average-interval: new-avg,
+                        shortest-interval: new-shortest,
+                        longest-interval: new-longest,
+                        last-entry-block: current-block
+                    })
+                    (ok true)
+                )
+            (begin
+                (map-set traveler-frequency-stats traveler {
+                    total-crossings: u1,
+                    average-interval: u0,
+                    shortest-interval: u999999,
+                    longest-interval: u0,
+                    last-entry-block: current-block
+                })
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-read-only (get-entry-frequency-stats (traveler principal))
+    (map-get? traveler-frequency-stats traveler)
+)
+
+(define-read-only (get-cooldown-policy (policy-name (string-ascii 20)))
+    (map-get? entry-cooldown-policies policy-name)
+)
+
+(define-read-only (get-time-until-eligible (traveler principal) (policy-name (string-ascii 20)))
+    (match (map-get? entry-cooldown-policies policy-name)
+        cooldown-blocks
+            (match (map-get? traveler-frequency-stats traveler)
+                stats
+                    (let (
+                        (blocks-since (- stacks-block-height (get last-entry-block stats)))
+                        (remaining (if (>= blocks-since cooldown-blocks) u0 (- cooldown-blocks blocks-since)))
+                    )
+                        (some remaining)
+                    )
+                (some u0)
+            )
+        none
+    )
+)
