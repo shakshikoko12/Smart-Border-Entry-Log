@@ -14,6 +14,11 @@
 (define-constant HIGH_RISK_THRESHOLD u75)
 (define-constant MEDIUM_RISK_THRESHOLD u50)
 
+(define-constant ERR_INVALID_REPUTATION_CHANGE (err u414))
+(define-constant REPUTATION_TIER_BRONZE u25)
+(define-constant REPUTATION_TIER_SILVER u50)
+(define-constant REPUTATION_TIER_GOLD u75)
+
 (define-data-var next-entry-id uint u1)
 
 (define-map authorized-agents principal bool)
@@ -452,4 +457,77 @@
             )
         none
     )
+)
+
+(define-map traveler-reputation principal {
+    trust-score: uint,
+    successful-crossings: uint,
+    violations: uint,
+    compliance-rate: uint,
+    tier-level: (string-ascii 10),
+    fast-track-eligible: bool,
+    last-updated: uint
+})
+
+(define-map reputation-tiers (string-ascii 10) {
+    min-score: uint,
+    crossing-bonus: uint,
+    violation-penalty: uint
+})
+
+(define-public (initialize-reputation-tiers)
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (map-set reputation-tiers "bronze" {min-score: u0, crossing-bonus: u2, violation-penalty: u5})
+        (map-set reputation-tiers "silver" {min-score: REPUTATION_TIER_BRONZE, crossing-bonus: u3, violation-penalty: u7})
+        (map-set reputation-tiers "gold" {min-score: REPUTATION_TIER_SILVER, crossing-bonus: u5, violation-penalty: u10})
+        (map-set reputation-tiers "platinum" {min-score: REPUTATION_TIER_GOLD, crossing-bonus: u8, violation-penalty: u15})
+        (ok true)
+    )
+)
+
+(define-public (update-reputation-score (traveler principal) (change-type (string-ascii 15)))
+    (let (
+        (current-rep (default-to {trust-score: u50, successful-crossings: u0, violations: u0, compliance-rate: u100, tier-level: "bronze", fast-track-eligible: false, last-updated: u0} (map-get? traveler-reputation traveler)))
+        (is-success (is-eq change-type "success"))
+        (is-violation (is-eq change-type "violation"))
+        (new-crossings (if is-success (+ (get successful-crossings current-rep) u1) (get successful-crossings current-rep)))
+        (new-violations (if is-violation (+ (get violations current-rep) u1) (get violations current-rep)))
+        (total-events (+ new-crossings new-violations))
+        (new-compliance (if (> total-events u0) (/ (* new-crossings u100) total-events) u100))
+        (score-change (if is-success u5 (if is-violation (- u0 u8) u0)))
+        (new-score-raw (if is-success (+ (get trust-score current-rep) u5) (if (>= (get trust-score current-rep) u8) (- (get trust-score current-rep) u8) u0)))
+        (new-score (if (> new-score-raw u100) u100 new-score-raw))
+        (tier (if (>= new-score REPUTATION_TIER_GOLD) "platinum" (if (>= new-score REPUTATION_TIER_SILVER) "gold" (if (>= new-score REPUTATION_TIER_BRONZE) "silver" "bronze"))))
+        (fast-track (>= new-score REPUTATION_TIER_SILVER))
+    )
+        (asserts! (default-to false (map-get? authorized-agents tx-sender)) ERR_UNAUTHORIZED)
+        (asserts! (or is-success is-violation) ERR_INVALID_REPUTATION_CHANGE)
+        
+        (map-set traveler-reputation traveler {
+            trust-score: new-score,
+            successful-crossings: new-crossings,
+            violations: new-violations,
+            compliance-rate: new-compliance,
+            tier-level: tier,
+            fast-track-eligible: fast-track,
+            last-updated: stacks-block-height
+        })
+        (ok new-score)
+    )
+)
+
+(define-read-only (get-traveler-reputation (traveler principal))
+    (map-get? traveler-reputation traveler)
+)
+
+(define-read-only (is-fast-track-eligible (traveler principal))
+    (match (map-get? traveler-reputation traveler)
+        rep-data (get fast-track-eligible rep-data)
+        false
+    )
+)
+
+(define-read-only (get-reputation-tier-benefits (tier-name (string-ascii 10)))
+    (map-get? reputation-tiers tier-name)
 )
